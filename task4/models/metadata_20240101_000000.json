@@ -1,0 +1,10 @@
+{
+  "timestamp": "20240101_000000",
+  "model_file": "model_20240101_000000.pkl",
+  "metrics": {
+    "mae": null,
+    "rmse": null,
+    "r2": null,
+    "note": "Pre-trained model from Task 2. Run task2_model.py for exact metrics."
+  }
+}

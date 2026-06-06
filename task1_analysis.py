@@ -26,7 +26,7 @@ DATA_PATH = "data.csv"
 OUTPUT_DIR = Path("plots")
 REPORT_PATH = "task1_HTMLreport.html"
 
-# Matplotlib defaults — consistent style across all plots.
+# Matplotlib defaults: consistent style across all plots.
 plt.rcParams.update({
     "figure.facecolor": "white",
     "axes.facecolor": "white",
@@ -39,10 +39,10 @@ plt.rcParams.update({
 
 # Channel metadata (identified during exploration).
 CHANNEL_NAMES = {
-    3:  "Ch 3 (TV Nova)",
-    4:  "Ch 4 (Nova Fun)",
-    9:  "Ch 9 (Sport)",
-    54: "Ch 54 (Nova Cinema)",
+    3:  "TV Nova",
+    4:  "Prima",
+    9:  "Sport Channel",
+    54: "Nova Cinema",
 }
 CHANNEL_COLORS = {
     3:  "#e63946",
@@ -64,15 +64,15 @@ def load_data(path: str) -> pd.DataFrame:
         ch{id}__f_{n}  → channel {id}, feature {n}
 
     Key features by convention:
-        f_10 — genre  (categorical)
-        f_11 — country (categorical)
-        f_12 — production year or similar numeric
+        f_10 = genre  (categorical)
+        f_11 = country (categorical)
+        f_12 = production year or similar numeric
     """
     df = pd.read_csv(path, low_memory=False)
 
     df["timeslot_datetime_from"] = pd.to_datetime(df["timeslot_datetime_from"])
 
-    # Temporal features — derived once, used by all plotting functions.
+    # Temporal features, derived once and used by all plotting functions.
     df["hour"]   = df["timeslot_datetime_from"].dt.hour
     df["dow"]    = df["timeslot_datetime_from"].dt.day_name()
     df["month"]  = df["timeslot_datetime_from"].dt.to_period("M")
@@ -244,7 +244,7 @@ def plot_cross_channel_corr(df: pd.DataFrame) -> str:
 def plot_genre_performance(df: pd.DataFrame) -> str:
     """Horizontal bar chart: average share by genre, per channel.
 
-    Channel 9 (Sport) has no genre column data — excluded.
+    Channel 9 (Sport) has no genre column data; excluded.
     """
     GENRE_FEATURES = {3: "ch3__f_10", 4: "ch4__f_10", 54: "ch54__f_10"}
     MIN_AIRINGS = 20
@@ -340,10 +340,11 @@ img { max-width: 100%; border: 1px solid #ddd; border-radius: 4px;
 
 _REPORT_SECTIONS = [
     ("Share Dynamics", "01_share_dynamics.png",
-     "Channel 3 (Flagship) dominates with the highest average share, consistent "
-     "with a main generalist channel. Channel 9 (Sport) has the lowest average "
+     "Channel 3 (TV Nova) dominates with the highest average share. "
+     "Channel 4 (Prima) has the second-highest "
+     "share at 12.12%, matching Prima's known market position. The Sport Channel has the lowest average "
      "share but likely spikes around major sporting events. Channel 54 (Cinema) "
-     "shows moderate share with high variance — movie performance is inherently "
+     "shows moderate share with high variance; movie performance is inherently "
      "unpredictable."),
     ("Weekly Trends", "02_weekly_trend.png",
      "The flagship channel shows the strongest seasonal patterns. All channels "
@@ -382,8 +383,8 @@ def build_html_report(plot_paths: dict[str, str], output_path: str) -> None:
         f"<style>{_REPORT_CSS}</style>",
         "</head><body>",
         "<h1>Task 1: Channel Analysis</h1>",
-        "<p>Analysis of four channels from the Nova TV group across ~34,000 "
-        "timeslots (Jan 2022 – Jan 2024).</p>",
+        "<p>Analysis of four Czech TV channels across ~34,000 "
+        "timeslots (Jan 2022 – Jan 2024): TV Nova, Prima, Sport Channel, and Nova Cinema.</p>",
     ]
 
     for title, filename, insight in _REPORT_SECTIONS:

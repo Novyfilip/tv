@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Task 3: Enhanced Share Prediction</title>
+<style>
+body { font-family: 'Segoe UI', sans-serif; max-width: 1100px;
+       margin: 0 auto; padding: 40px 20px; background: #fafafa; color: #222; }
+h1 { border-bottom: 3px solid #457b9d; padding-bottom: 10px; }
+h2 { color: #457b9d; margin-top: 40px; }
+h3 { color: #333; margin-top: 30px; }
+img { max-width: 100%; border: 1px solid #ddd; border-radius: 4px;
+      margin: 15px 0; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+table { border-collapse: collapse; margin: 15px 0; }
+th, td { padding: 8px 16px; border: 1px solid #ddd; text-align: right; }
+th { background: #f0f0f0; }
+.insight { background: #f0f7ff; border-left: 4px solid #457b9d;
+           padding: 12px 18px; margin: 15px 0; border-radius: 0 4px 4px 0; }
+.section { margin-bottom: 50px; }
+</style>
+</head>
+<body>
+
+<h1>Task 3: Enhanced Share Prediction with 3-Month Prior</h1>
+
+<p>Model: LightGBM gradient-boosted decision trees.
+Test set: last 30 days of data (time-based holdout).
+Key prior: <code>share_15_54_3mo_mean</code> used as a feature.</p>
+
+<h2>1. Model Performance</h2>
+
+<table>
+<tr><th>Metric</th><th>LightGBM</th><th>Baseline (3mo mean)</th><th>Improvement</th></tr>
+<tr><td>MAE</td><td>3.227</td><td>3.590</td><td>+10.1%</td></tr>
+<tr><td>RMSE</td><td>4.323</td><td>4.791</td><td>+9.8%</td></tr>
+<tr><td>R²</td><td>0.686</td><td>0.614</td><td>+0.0717</td></tr>
+</table>
+
+<div class="insight">
+<strong>How to read this:</strong> The 3-month rolling mean is already a strong predictor
+(it IS a trailing average of the target). The LightGBM model improves on it by learning
+the <em>residual</em> (what pushes share above or below its recent average) using
+programming attributes, time-of-day patterns, and competitor content signals.
+</div>
+
+<h2>2. Model Choice Justification</h2>
+
+<div class="insight">
+<strong>LightGBM (gradient-boosted decision trees)</strong> was chosen over neural networks
+and linear models for four reasons:
+</div>
+
+<ul>
+<li><strong>Mixed data types:</strong> The feature set combines numeric values (ratings,
+duration), categorical variables (genre, country), and high-cardinality channel identifiers.
+LightGBM handles all of these natively with its histogram-based algorithm; no manual
+one-hot encoding, no embedding layers to tune.</li>
+
+<li><strong>Native missing-value handling:</strong> Channel 9 (Sport) is systematically
+missing f_7 through f_11 (100% null). LightGBM learns optimal splits for missing vs
+non-missing values automatically, treating null as a signal rather than a problem
+to impute away.</li>
+
+<li><strong>Training cost:</strong> ~2-5 seconds on CPU for 500 trees with early stopping.
+Daily retraining (Task 4 requirement) is trivially cheap. A comparable neural architecture
+would need GPU, minutes per training run, and hyperparameter tuning: 50-100× higher cost.</li>
+
+<li><strong>Explainability:</strong> Tree-based models produce interpretable feature
+importance by construction. SHAP values provide per-prediction explanations: for any
+timeslot, you can see exactly which features drove the forecast up or down and by how much.
+Linear models are explainable but can't capture non-linear interactions (genre × prime time,
+competitor strength × day of week); deep learning can capture interactions but resists
+explanation. LightGBM sits at the Pareto frontier of accuracy and explainability.</li>
+</ul>
+
+<h2>3. Cost Analysis</h2>
+
+<table>
+<tr><th>Resource</th><th>LightGBM</th><th>Neural Net (comparison)</th></tr>
+<tr><td>Training time</td><td>2–5 s (CPU)</td><td>Minutes per epoch (GPU)</td></tr>
+<tr><td>Inference latency</td><td>Microseconds (tree traversal)</td><td>Milliseconds (forward pass)</td></tr>
+<tr><td>Model size</td><td>1–5 MB serialized</td><td>50–500 MB</td></tr>
+<tr><td>Daily compute cost</td><td>Negligible (&lt;$0.001)</td><td>$0.05–$0.50 (GPU instance)</td></tr>
+<tr><td>Cold-start deploy</td><td>Import a pickle file</td><td>Load weights, warm up runtime</td></tr>
+</table>
+
+<h2>4. What Drives the Predictions</h2>
+
+<div class="section">
+<h3>Feature Importance (Gain)</h3>
+<img src="plots/task3_feature_importance.png" alt="Feature Importance">
+<div class="insight">
+The 3-month rolling mean dominates feature importance, confirming the assignment's premise
+that it's a strong prior. Temporal features (hour, day of week) consistently rank high,
+validating the prime-time and weekend patterns seen in Task 1 EDA.
+</div>
+</div>
+
+<div class="section">
+<h3>SHAP Summary</h3>
+<img src="plots/task3_shap_summary.png" alt="SHAP Summary">
+<div class="insight">
+SHAP beeswarm shows direction: high values of the 3mo mean push predictions UP (red dots
+on the right), confirming intuitive behavior. Programming attributes (genre, country)
+show narrower spread; they fine-tune the forecast around the 3mo prior.
+</div>
+</div>
+
+<h2>5. Error Analysis</h2>
+
+<div class="section">
+<h3>Predicted vs Actual</h3>
+<img src="plots/task3_error_analysis.png" alt="Error Analysis">
+<div class="insight">
+The scatter plot shows strong agreement for mid-range shares (5–25%), with increasing
+variance at the tails. The error distribution is roughly symmetric and centered near zero,
+indicating no systematic over- or under-prediction bias.
+</div>
+</div>
+
+<div class="section">
+<h3>Error Over Time</h3>
+<img src="plots/task3_error_over_time.png" alt="Error Over Time">
+<div class="insight">
+Daily MAE fluctuates but stays within a tight band; the model does not degrade across the
+test period. Spikes likely correspond to special programming events or holidays where
+viewing patterns deviate from the norm.
+</div>
+</div>
+
+<div class="section">
+<h3>Error by Channel</h3>
+<img src="plots/task3_error_by_channel.png" alt="Error by Channel">
+</div>
+
+<h2>6. Strengths and Weaknesses</h2>
+
+<h3>Where the model performs well</h3>
+<ul>
+<li><strong>Stable, recurring programming:</strong> Regular timeslots with known genres
+and consistent scheduling; the model learns these patterns reliably.</li>
+<li><strong>Prime time:</strong> The 19:00–23:00 window has the most training data and the
+strongest feature signals (hour, is_prime_time interaction).</li>
+<li><strong>Channels with complete metadata:</strong> Channels 3, 4, and 54 benefit from
+genre and country features that help disambiguate similar timeslots.</li>
+</ul>
+
+<h3>Where the model falls short</h3>
+<ul>
+<li><strong>Channel 9 (Sport):</strong> Missing f_7 through f_11 means the model relies
+almost entirely on temporal features and the 3mo prior. Live sports events create spikes
+that the model cannot anticipate without event metadata.</li>
+<li><strong>One-off events:</strong> Special broadcasts, premieres, live events; these
+deviate from the historical patterns the model has learned.</li>
+<li><strong>Tail shares:</strong> Very high or very low share values are harder to predict;
+these are rare events with less training signal.</li>
+<li><strong>Holidays:</strong> Seasonal anomalies where viewing behavior shifts (Christmas,
+New Year's Eve) appear in the data but the model has only 1–2 examples per year to learn from.</li>
+</ul>
+
+<h2>7. Future Improvements</h2>
+
+<ul>
+<li><strong>External data:</strong> TV program guide data (program names, episode numbers,
+live/sport flag), holiday calendar, and weather data (bad weather → more TV viewers).</li>
+<li><strong>Lag features:</strong> Share at the same hour on the previous same-day-of-week;
+captures week-over-week momentum without leaking future data.</li>
+<li><strong>Target encoding:</strong> For genre × channel combinations, mean target encoding
+can capture non-linear interactions that raw categorical encoding misses.</li>
+<li><strong>Quantile regression:</strong> LightGBM supports quantile loss natively;
+predicting a prediction interval (e.g., 10th/90th percentile) gives uncertainty estimates
+useful for scheduling decisions.</li>
+<li><strong>Competitor data outside Nova group:</strong> The assignment provides only Nova
+channels, but real audience share is a zero-sum game across ALL channels. Including
+programming data from competing networks would improve accuracy.</li>
+<li><strong>Online learning:</strong> Instead of full daily retraining, incremental model
+updates (via LightGBM's <code>refit</code> or warm-start) reduce compute and allow the model
+to adapt to slow concept drift.</li>
+</ul>
+
+</body>
+</html>

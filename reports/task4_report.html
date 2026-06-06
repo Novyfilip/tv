@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Task 4 — Containerized Prediction Service</title>
+<style>
+body {
+    font-family: 'Segoe UI', sans-serif; max-width: 1100px;
+    margin: 0 auto; padding: 40px 20px; background: #fafafa; color: #222;
+}
+h1 { border-bottom: 3px solid #2a9d8f; padding-bottom: 10px; }
+h2 { color: #2a9d8f; margin-top: 40px; }
+h3 { color: #333; margin-top: 30px; }
+pre { background: #f4f4f4; padding: 12px 16px; border-radius: 4px;
+      overflow-x: auto; font-size: 13px; border: 1px solid #e0e0e0; }
+code { background: #f4f4f4; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
+table { border-collapse: collapse; margin: 15px 0; width: 100%; }
+th, td { padding: 8px 16px; border: 1px solid #ddd; text-align: left; }
+th { background: #f0f0f0; }
+.insight { background: #f0f7ff; border-left: 4px solid #2a9d8f;
+           padding: 12px 18px; margin: 15px 0; border-radius: 0 4px 4px 0; }
+.warning { background: #fff8e1; border-left: 4px solid #e9c46a;
+           padding: 12px 18px; margin: 15px 0; border-radius: 0 4px 4px 0; }
+.section { margin-bottom: 50px; }
+.check { color: #2a9d8f; }
+.cross { color: #e63946; }
+.arch { background: #263238; color: #a5d6a7; padding: 20px; border-radius: 6px;
+        font-family: 'Consolas', 'Courier New', monospace; font-size: 13px;
+        line-height: 1.6; white-space: pre; overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<h1>Task 4: Containerized Prediction Service with Daily Retraining</h1>
+
+<p>Final task of the Nova TV case study. The LightGBM model from Task 2 is
+packaged into a Dockerized REST API with a retraining pipeline, model versioning,
+and rollback capability.</p>
+
+<h2>1. What Was Built</h2>
+
+<div class="arch">
+                    +-------------------+
+                    |   REST API        |  FastAPI on port 8000
+                    |   (app/api.py)    |  POST /predict, GET /health, GET /model-info
+                    +--------+----------+
+                             |
+                    +--------+----------+
+                    |   Predictor       |  Loads latest model from latest.txt
+                    |   (app/predict.py)|  Runs feature engineering + inference
+                    +--------+----------+
+                             |
+                    +--------+----------+
+                    |  Feature Eng.     |  Shared by train AND predict paths
+                    |  (app/feature_    |  Temporal + own/competitor + encoding
+                    |   engineering.py) |
+                    +-------------------+
+
+  +---------------------------------------------+
+  |  Orchestration (scripts/)                   |
+  |  retrain.sh  -- daily: download, train, save|
+  |  rollback.sh -- revert latest.txt pointer   |
+  +---------------------------------------------+
+
+  +---------------------------------------------+
+  |  Versioning (models/)                       |
+  |  model_YYYYMMDD_HHMMSS.pkl   + metadata      |
+  |  feature_cols.json           + latest.txt    |
+  +---------------------------------------------+
+</div>
+
+<div class="insight">
+<strong>Design principle:</strong> The feature engineering pipeline is the
+single source of truth -- used identically by both the training path and the
+prediction path. This guarantees that the features the model was trained on
+are exactly the features used at inference time.
+</div>
+
+<h2>2. System Components</h2>
+
+<h3>2.1 Feature Engineering (<code>app/feature_engineering.py</code>)</h3>
+
+<p>Extracted from <code>task2_model.py</code> into a reusable module. Accepts a
+DataFrame with raw <code>data.csv</code> columns and returns engineered features.</p>
+
+<table>
+<tr><th>Step</th><th>What it does</th><th>Why</th></tr>
+<tr>
+  <td>1. Temporal features</td>
+  <td>Derives <code>hour</code>, <code>day_of_week</code>, <code>month</code>,
+      <code>is_weekend</code>, <code>is_prime_time</code></td>
+  <td>Task 1 EDA showed prime time and day-of-week are the strongest non-prior signals</td>
+</tr>
+<tr>
+  <td>2. Own vs competitor</td>
+  <td>For each row, extracts its channel's <code>f_1..f_12</code> as
+      <code>own_f_N</code> and computes <code>comp_mean_f_N</code> +
+      <code>comp_max_f_N</code> from the other 3 channels</td>
+  <td>Task 1 showed negative cross-channel correlations; the model learns zero-sum dynamics</td>
+</tr>
+<tr>
+  <td>3. Categorical encoding</td>
+  <td>Label-encodes genre (<code>own_f_10</code>) and country
+      (<code>own_f_11</code>), filling NaN with "MISSING"</td>
+  <td>Linear regression needs numeric input; LightGBM would handle strings natively but pipeline must serve both</td>
+</tr>
+<tr>
+  <td>4. Channel one-hot</td>
+  <td>One-hot encodes <code>channel_id</code> into <code>channel_3</code>,
+      <code>channel_4</code>, <code>channel_9</code>, <code>channel_54</code></td>
+  <td>Gives the model explicit channel identity beyond the own-feature signal</td>
+</tr>
+<tr>
+  <td>5. Feature selection</td>
+  <td>Returns 42 columns in the exact order the model expects</td>
+  <td>The trained model's <code>feature_names_in_</code> must match</td>
+</tr>
+</table>
+
+<h3>2.2 Training Pipeline (<code>app/train.py</code>)</h3>
+
+<p>CLI script invoked by <code>retrain.sh</code>. <code>python -m app.train [--data-url URL]</code></p>
+
+<table>
+<tr><th>Step</th><th>What it does</th></tr>
+<tr><td>1. Data acquisition</td><td>Downloads from URL or loads local <code>data/data.csv</code></td></tr>
+<tr><td>2. Feature engineering</td><td>Calls the shared <code>engineer_features()</code></td></tr>
+<tr><td>3. Time split</td><td>Last 30 days as validation; earlier data as training</td></tr>
+<tr><td>4. Model training</td><td>LightGBM with early stopping (50 rounds), 1000 trees max</td></tr>
+<tr><td>5. Versioned save</td><td>Writes <code>model_TIMESTAMP.pkl</code>, <code>metadata_TIMESTAMP.json</code>,
+    <code>feature_cols.json</code>, and updates <code>latest.txt</code></td></tr>
+</table>
+
+<h3>2.3 Prediction Service (<code>app/predict.py</code> + <code>app/api.py</code>)</h3>
+
+<table>
+<tr><th>Endpoint</th><th>Method</th><th>What it returns</th></tr>
+<tr>
+  <td><code>/predict</code></td>
+  <td>POST</td>
+  <td>Predicted <code>share_15_54</code> for each requested (timeslot, channel) pair.
+      Looks up programming features from the stored dataset by finding the closest
+      matching timeslot.</td>
+</tr>
+<tr>
+  <td><code>/health</code></td>
+  <td>GET</td>
+  <td><code>{"status": "ok", "model_loaded": true}</code></td>
+</tr>
+<tr>
+  <td><code>/model-info</code></td>
+  <td>GET</td>
+  <td>Current model timestamp and validation metrics (MAE, RMSE, R²)</td>
+</tr>
+</table>
+
+<div class="insight">
+<strong>Prediction flow:</strong> The API loads <code>data/data.csv</code> on each
+request (~0.2s for 34k rows). For each requested timeslot, it finds the closest
+matching row in the stored data by minimizing absolute time difference, then runs
+the model on that row's features. In production this would join against a live
+programming schedule database instead of scanning CSV.
+</div>
+
+<h3>2.4 Orchestration Scripts</h3>
+
+<table>
+<tr><th>Script</th><th>What it does</th></tr>
+<tr>
+  <td><code>scripts/retrain.sh [DATA_URL]</code></td>
+  <td>
+    <ol>
+      <li>Remembers current model from <code>latest.txt</code></li>
+      <li>Runs <code>python -m app.train</code></li>
+      <li>If training fails (non-zero exit): restores the previous model</li>
+      <li>Prints old and new model filenames for audit</li>
+    </ol>
+  </td>
+</tr>
+<tr>
+  <td><code>scripts/rollback.sh MODEL_FILE</code></td>
+  <td>Rewrites <code>latest.txt</code> to point to the specified model version.
+      Lists available models if the requested one is not found.</td>
+</tr>
+</table>
+
+<h2>3. Model Versioning</h2>
+
+<p>Models are timestamped files. No models are ever deleted -- all versions retained.</p>
+
+<pre>models/
+├── model_20240101_000000.pkl       ← Seed model from Task 2
+├── metadata_20240101_000000.json   ← Placeholder metadata
+├── model_20240102_030000.pkl       ← First retrained model
+├── metadata_20240102_030000.json   ← MAE, RMSE, R², n_train, n_val
+├── model_20240103_030000.pkl       ← Second retrained model
+├── metadata_20240103_030000.json
+├── feature_cols.json               ← 42 feature column names
+└── latest.txt                      ← "model_20240103_030000.pkl"</pre>
+
+<div class="insight">
+<strong>Rollback mechanism:</strong> <code>latest.txt</code> is the single point of
+indirection. To roll back, change this file to point to an older model. The API
+picks up the change on restart (or could be extended to watch the file and hot-reload).
+</div>
+
+<h2>4. Tests</h2>
+
+<p>13 tests across 3 files, following the implementation plan.</p>
+
+<table>
+<tr><th>Test file</th><th>Tests</th><th>What it verifies</th></tr>
+<tr>
+  <td><code>test_feature_engineering.py</code></td>
+  <td>8</td>
+  <td>
+    DataFrame and feature list returned correctly;
+    temporal features created (hour, day_of_week, month, weekend, prime_time);
+    own features created (own_f_1..own_f_12);
+    competitor features created (comp_mean_f_N, comp_max_f_N);
+    prime_time flag = 1 at 20:00 and = 0 at 10:00;
+    no target leakage (share_15_54 and share_15_54_3mo_mean excluded);
+    NaN in categoricals handled without crashing;
+    single-row edge case;
+    channel columns present in feature list
+  </td>
+</tr>
+<tr>
+  <td><code>test_api.py</code></td>
+  <td>4</td>
+  <td>
+    /health returns 200 + status;
+    /model-info returns metadata;
+    /predict returns predictions for valid input;
+    /predict returns 400 for mismatched timeslot/channel lengths;
+    /predict handles multiple channels in one request
+  </td>
+</tr>
+<tr>
+  <td><code>test_train.py</code></td>
+  <td>1</td>
+  <td>
+    Full integration: synthetic data → train → save → verify .pkl exists,
+    metadata.json exists with valid metrics, latest.txt points correctly
+  </td>
+</tr>
+</table>
+
+<p>Run with: <code>pytest tests/ -v</code> (requires <code>pytest</code> and <code>httpx</code>)</p>
+
+<h2>5. Design Decisions & Justification</h2>
+
+<div class="section">
+<h3>LightGBM over neural networks</h3>
+<div class="insight">
+Trains in seconds on CPU. Handles missing values natively (Channel 9's 100% null
+features are treated as a learnable signal, not imputed away). Inference is
+microseconds per prediction -- a tree traversal, not a forward pass. Explainable
+via SHAP. Grinsztajn et al. (2022) showed tree-based models consistently
+outperform deep learning on tabular data at this scale.
+</div>
+
+<h3>Timestamp-based versioning over git</h3>
+<div class="insight">
+Simpler for this use case. Each model is a self-contained .pkl file with
+accompanying metadata JSON. Rollback is a single-line file write. No branching,
+no merge conflicts, no git history to manage. Would switch to a model registry
+(MLflow, DVC) at larger scale.
+</div>
+
+<h3>FastAPI over Flask</h3>
+<div class="insight">
+Automatic OpenAPI docs at /docs. Built-in request validation via Pydantic models.
+Async support (though this workload is CPU-bound and wouldn't benefit much).
+Modern, actively maintained, and widely adopted for ML serving.
+</div>
+
+<h3>Shell script orchestration over Airflow/Prefect</h3>
+<div class="insight">
+This is a single model with a single daily job. A workflow engine is overkill.
+<code>retrain.sh</code> is 30 lines of bash -- readable, auditable, and trivially
+schedulable via cron. Would migrate to a workflow engine if the pipeline grew to
+multiple models with complex dependencies.
+</div>
+</div>
+
+<h2>6. Known Limitations & Production Hardening</h2>
+
+<table>
+<tr><th>#</th><th>Limitation</th><th>Current behavior</th><th>Production fix</th></tr>
+
+<tr>
+  <td>1</td>
+  <td>CSV loaded on every /predict call</td>
+  <td>10 MB file parsed each request (~0.2s)</td>
+  <td>Pre-load into memory at startup. Index by timeslot. Or accept full feature row in request body.</td>
+</tr>
+
+<tr>
+  <td>2</td>
+  <td>LabelEncoders re-fit each time</td>
+  <td>Stable on static data; breaks if new categories appear</td>
+  <td>Save fitted encoders alongside model. Map unseen categories to "UNKNOWN".</td>
+</tr>
+
+<tr>
+  <td>3</td>
+  <td>Binary pass/fail quality gate</td>
+  <td>Only rolls back on crash, not on metrics regression</td>
+  <td>Compare old/new metadata MAE. Reject if regression >20%.</td>
+</tr>
+
+<tr>
+  <td>4</td>
+  <td>Nearest-timeslot feature lookup</td>
+  <td>Uses closest matching timeslot if exact not found</td>
+  <td>Accept full feature row in request, or join against live schedule DB.</td>
+</tr>
+
+<tr>
+  <td>5</td>
+  <td>No authentication</td>
+  <td>Open API</td>
+  <td>API key middleware, request logging, rate limiting.</td>
+</tr>
+
+<tr>
+  <td>6</td>
+  <td>Single-container deployment</td>
+  <td>API and training share resources</td>
+  <td>Split into API server + training worker with shared model volume.</td>
+</tr>
+
+<tr>
+  <td>7</td>
+  <td>feature_cols.json overwritten</td>
+  <td>Old models break if feature list changes</td>
+  <td>Version feature_cols.json alongside each model.</td>
+</tr>
+</table>
+
+<h2>7. How to Run</h2>
+
+<h3>Option A: Docker (one command)</h3>
+<pre>cd task4
+docker-compose up --build</pre>
+<p>API at <code>http://localhost:8000</code>. Docs at <code>http://localhost:8000/docs</code>.</p>
+
+<h3>Option B: Local Python</h3>
+<pre>cd task4
+pip install -r requirements.txt
+pip install pytest httpx       # for tests
+
+# Verify
+pytest tests/ -v
+
+# Start
+uvicorn app.api:app --host 0.0.0.0 --port 8000</pre>
+
+<h3>Example API calls</h3>
+<pre># Health check
+curl http://localhost:8000/health
+
+# Model metadata
+curl http://localhost:8000/model-info
+
+# Predict share for Channel 3 at a specific timeslot
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"timeslot_datetime_from":["2024-01-10T20:00:00"],"channel_id":[3]}'
+
+# Retrain from fresh data
+./scripts/retrain.sh https://example.com/updated_data.csv
+
+# Rollback
+./scripts/rollback.sh model_20240101_000000.pkl</pre>
+
+<h2>8. File Inventory</h2>
+
+<table>
+<tr><th>File</th><th>Size</th><th>Role</th></tr>
+<tr><td><code>app/feature_engineering.py</code></td><td>3.1 KB</td><td>Shared feature transforms</td></tr>
+<tr><td><code>app/train.py</code></td><td>5.2 KB</td><td>CLI training + versioning</td></tr>
+<tr><td><code>app/predict.py</code></td><td>1.6 KB</td><td>Model loading + inference</td></tr>
+<tr><td><code>app/api.py</code></td><td>4.2 KB</td><td>FastAPI endpoints</td></tr>
+<tr><td><code>scripts/retrain.sh</code></td><td>1.6 KB</td><td>Daily orchestration</td></tr>
+<tr><td><code>scripts/rollback.sh</code></td><td>0.7 KB</td><td>Manual rollback</td></tr>
+<tr><td><code>tests/test_feature_engineering.py</code></td><td>3.7 KB</td><td>8 tests</td></tr>
+<tr><td><code>tests/test_api.py</code></td><td>1.9 KB</td><td>4 tests</td></tr>
+<tr><td><code>tests/test_train.py</code></td><td>1.6 KB</td><td>1 integration test</td></tr>
+<tr><td><code>Dockerfile</code></td><td>0.5 KB</td><td>Container build</td></tr>
+<tr><td><code>docker-compose.yml</code></td><td>0.5 KB</td><td>Service orchestration</td></tr>
+<tr><td><code>requirements.txt</code></td><td>0.1 KB</td><td>Python dependencies</td></tr>
+<tr><td><code>README.md</code></td><td>4.6 KB</td><td>User-facing documentation</td></tr>
+<tr><td><code>ORCHESTRATOR.md</code></td><td>13.7 KB</td><td>AI/human handoff document</td></tr>
+</table>
+
+</body>
+</html>
